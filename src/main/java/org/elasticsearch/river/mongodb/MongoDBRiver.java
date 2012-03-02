@@ -353,21 +353,27 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
             oplogCursor = processFullCollection();
           }
           if (!oplogCursor.hasNext()) {
-            Thread.sleep(500); // sleep since mongo doesn't really work well until at least one item is in the cursor.
+            sleep(500); // sleep since mongo doesn't really work well until at least one item is in the cursor.
             continue;
           }
           DBObject item;
           while ((item = oplogCursor.next()) != null) {
             processOplogEntry(item);
           }
-          Thread.sleep(5000);
         } catch (MongoException mEx) {
           logger.error("Mongo gave an exception", mEx);
         } catch (NoSuchElementException nEx) {
           logger.warn("A mongoDB cursor bug ?", nEx);
-        } catch (InterruptedException e) {
-          logger.debug("river-mongodb slurper interrupted");
         }
+        sleep(5000);
+      }
+    }
+
+    private void sleep(long millis) {
+      try {
+        Thread.sleep(millis);
+      } catch (InterruptedException e) {
+        throw new RuntimeException(e);
       }
     }
 
@@ -456,6 +462,7 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
     @SuppressWarnings("unchecked")
     private void addQueryToStream(final String operation, final BSONTimestamp currentTimestamp, final DBObject update) {
       for (DBObject item : slurpedCollection.find(update)) {
+        // Assumes that update doesn't modify fields that would change the result of the find
         addToStream(operation, currentTimestamp, item.toMap());
       }
     }
