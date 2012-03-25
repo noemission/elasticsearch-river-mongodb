@@ -126,6 +126,8 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
     this.riverIndexName = riverIndexName;
     this.client = client;
 
+    logger.info("River name is {}, river type is {}, river index name is {}, global settings are {}, settings.settings() are {}", riverName.name(), riverName.type(), riverIndexName, settings.globalSettings().getAsMap(), settings.settings());
+    
     if (settings.settings().containsKey(RIVER_TYPE)) {
       Map<String, Object> mongoSettings = (Map<String, Object>) settings.settings().get(RIVER_TYPE);
       mongoHost = XContentMapValues.nodeStringValue(mongoSettings.get(HOST_FIELD), "localhost");
@@ -174,7 +176,7 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
   @Override
   public void start() {
     logger.info(
-        "starting mongodb stream: host [{}], port [{}], gridfs [{}], filter [{}], db [{}], indexing to [{}]/[{}]",
+        "starting mongodb stream: host [{}], port [{}], gridfs [{}], db [{}], indexing to [{}]/[{}]",
         mongoHost, mongoPort, mongoGridFS, mongoDb, indexName, typeName);
     try {
       client.admin().indices().prepareCreate(indexName).execute().actionGet();
@@ -308,7 +310,7 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
     private DB oplogDb;
     private DBCollection oplogCollection;
 
-    private boolean asignCollections() {
+    private boolean assignCollections() {
       oplogDb = mongo.getDB(MONGODB_LOCAL);
       if (!mongoUser.isEmpty() && !mongoPassword.isEmpty()) {
         boolean auth = oplogDb.authenticate(mongoUser,
@@ -336,7 +338,10 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
     @Override
     public void run() {
       try {
+    	  // FIXME this should be updated to support multiple hosts/ports, for better replset support
         mongo = new Mongo(new ServerAddress(mongoHost, mongoPort));
+        
+        logger.debug("Connected to mongo server [{}] on port [{}]", mongoHost, mongoPort);
       } catch (UnknownHostException e) {
         logger.error("Unknown host");
         return;
@@ -344,22 +349,27 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
 
       while (active) {
         try {
-          if (!asignCollections()) {
-            break; // failed to asign oplogCollection or slurpedCollection
+          if (!assignCollections()) {
+            logger.warn("Could not assign collections! Skipping pass...");
+            break; // failed to assign oplogCollection or slurpedCollection
           }
 
           DBCursor oplogCursor = oplogCursor(null);
           if (oplogCursor == null) {
+            logger.debug("No existing oplog cursor found! Processing full collection...");
             oplogCursor = processFullCollection();
           }
           if (!oplogCursor.hasNext()) {
-            sleep(500); // sleep since mongo doesn't really work well until at least one item is in the cursor.
+            logger.debug("No items found in oplog cursor! Skipping pass...");
+            sleep(5000); // sleep since mongo doesn't really work well until at least one item is in the cursor.
             continue;
           }
           DBObject item;
           while ((item = oplogCursor.next()) != null) {
+            logger.debug("Processing item [{}]...", item.toMap());
             processOplogEntry(item);
           }
+          logger.debug("Pass complete!");
         } catch (MongoException mEx) {
           logger.error("Mongo gave an exception", mEx);
         } catch (NoSuchElementException nEx) {
@@ -378,21 +388,21 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
     }
 
     private DBCursor processFullCollection() {
-      CommandResult lockResult = mongo.fsyncAndLock();
-      if (lockResult.ok()) {
-        try {
+      //CommandResult lockResult = mongo.fsyncAndLock();
+      //if (lockResult.ok()) {
+      //  try {
           BSONTimestamp currentTimestamp = (BSONTimestamp) oplogCollection.find()
               .sort(new BasicDBObject(OPLOG_TIMESTAMP, -1))
               .limit(1).next()
               .get(OPLOG_TIMESTAMP);
           addQueryToStream("i", currentTimestamp, null);
           return oplogCursor(currentTimestamp);
-        } finally {
-          mongo.unlock();
-        }
-      } else {
-        throw new MongoException("Could not lock the database for FullCollection sync");
-      }
+      //  } finally {
+      //    mongo.unlock();
+      //  }
+      //} else {
+      //  throw new MongoException("Could not lock the database for FullCollection sync");
+      //}
     }
 
     @SuppressWarnings("unchecked")
