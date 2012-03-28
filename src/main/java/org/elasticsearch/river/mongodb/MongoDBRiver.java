@@ -343,7 +343,7 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
       for (String host : hostNameList) {
         addresses.add(new ServerAddress(new InetSocketAddress(host.trim(), mongoPort)));
       }
-      Mongo mongo = new Mongo(addresses);
+      mongo = new Mongo(addresses);
       logger.debug("Connected to mongo server [{}] on port [{}]", mongoHost, mongoPort);
 
       while (active) {
