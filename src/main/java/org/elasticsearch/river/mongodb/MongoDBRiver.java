@@ -23,10 +23,9 @@ import static org.elasticsearch.client.Requests.indexRequest;
 import static org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.NoSuchElementException;
+import java.util.*;
 import java.util.regex.Pattern;
 
 import org.bson.types.BSONTimestamp;
@@ -38,6 +37,7 @@ import org.elasticsearch.action.get.GetResponse;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.client.action.bulk.BulkRequestBuilder;
 import org.elasticsearch.cluster.block.ClusterBlockException;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
@@ -336,16 +336,15 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
     }
 
     @Override
-    public void run() {
-      try {
-    	  // FIXME this should be updated to support multiple hosts/ports, for better replset support
-        mongo = new Mongo(new ServerAddress(mongoHost, mongoPort));
-        
-        logger.debug("Connected to mongo server [{}] on port [{}]", mongoHost, mongoPort);
-      } catch (UnknownHostException e) {
-        logger.error("Unknown host");
-        return;
+    public void run()
+    {
+      List<ServerAddress> addresses = new ArrayList<ServerAddress>();
+      String[] hostNameList = mongoHost.split(",");
+      for (String host : hostNameList) {
+        addresses.add(new ServerAddress(new InetSocketAddress(host.trim(), mongoPort)));
       }
+      Mongo mongo = new Mongo(addresses);
+      logger.debug("Connected to mongo server [{}] on port [{}]", mongoHost, mongoPort);
 
       while (active) {
         try {
