@@ -115,6 +115,8 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
   protected Thread tailerThread;
   protected Thread indexerThread;
   protected volatile boolean active = true;
+  private long sleepBetweenRuns = 5000;
+  private long sleepBetweenRetries = 10000;
 
   private final TransferQueue<Map<String, Object>> stream = new LinkedTransferQueue<Map<String, Object>>();
 
@@ -255,7 +257,7 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
               // TODO write to exception queue?
               logger.warn("failed to execute" + response.buildFailureMessage());
             }
-          } catch (Exception e) {
+          } catch (Throwable e) {
             logger.warn("failed to execute bulk", e);
           }
 
@@ -280,11 +282,13 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
           logger.debug("Operation: {} - id: {} - contains attachment: {}", operation, objectId,
               data.containsKey("attachment"));
           bulk.add(indexRequest(indexName).type(typeName).id(objectId).source(build(data, objectId)));
-        }
-        if ("d".equals(operation)) {
+        } else if  ("d".equals(operation)) {
           logger.info("Delete request [{}], [{}], [{}]", indexName, typeName, objectId);
           bulk.add(new DeleteRequest(indexName, typeName, objectId));
+        } else {
+          logger.warn("Unrecognized oplog operation for object: " + objectId + ":" + typeName);
         }
+
       } catch (IOException e) {
         logger.warn("failed to parse {}", e, data);
       }
@@ -344,37 +348,47 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
         addresses.add(new ServerAddress(new InetSocketAddress(host.trim(), mongoPort)));
       }
       mongo = new Mongo(addresses);
-      logger.debug("Connected to mongo server [{}] on port [{}]", mongoHost, mongoPort);
+      logger.info("Connected to mongo server [{}] on port [{}]", mongoHost, mongoPort);
+
+      Throwable unclearedFailure = null;
 
       while (active) {
         try {
           if (!assignCollections()) {
             logger.warn("Could not assign collections! Skipping pass...");
-            break; // failed to assign oplogCollection or slurpedCollection
-          }
+          } else {
+            DBCursor oplogCursor = oplogCursor(null);
 
-          DBCursor oplogCursor = oplogCursor(null);
-          if (oplogCursor == null) {
-            logger.debug("No existing oplog cursor found! Processing full collection...");
-            oplogCursor = processFullCollection();
+            if (oplogCursor == null) {
+              logger.info("No existing oplog cursor found! Processing full collection...");
+              oplogCursor = processFullCollection();
+            } else if (!oplogCursor.hasNext()) {
+              logger.debug("No items found in oplog cursor! Skipping pass...");
+            } else {
+              DBObject item;
+              while ((item = oplogCursor.next()) != null) {
+                processOplogEntry(item);
+              }
+            }
+            if (unclearedFailure != null) {
+              logger.info("Recovered from exception");
+              unclearedFailure = null;
+            }
+
+            logger.debug("Pass complete!");
           }
-          if (!oplogCursor.hasNext()) {
-            logger.debug("No items found in oplog cursor! Skipping pass...");
-            sleep(5000); // sleep since mongo doesn't really work well until at least one item is in the cursor.
-            continue;
+        } catch (Throwable e) {
+          if (unclearedFailure == null) {
+            unclearedFailure = e;
+            logger.error("Unexpected exception occurred; will retry",  e);
+          } else if (!e.toString().equals(unclearedFailure.toString())) {
+            unclearedFailure = e;
+            logger.error("New unexpected exception occurred; will retry",  e);
+          } else {
+            logger.info("Recurring exception ({}); continue to retry", e.getClass().getName());
           }
-          DBObject item;
-          while ((item = oplogCursor.next()) != null) {
-            logger.debug("Processing item [{}]...", item.toMap());
-            processOplogEntry(item);
-          }
-          logger.debug("Pass complete!");
-        } catch (MongoException mEx) {
-          logger.error("Mongo gave an exception", mEx);
-        } catch (NoSuchElementException nEx) {
-          logger.warn("A mongoDB cursor bug ?", nEx);
         }
-        sleep(5000);
+        sleep(unclearedFailure != null ? sleepBetweenRetries : sleepBetweenRuns);
       }
     }
 
@@ -387,21 +401,12 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
     }
 
     private DBCursor processFullCollection() {
-      //CommandResult lockResult = mongo.fsyncAndLock();
-      //if (lockResult.ok()) {
-      //  try {
-          BSONTimestamp currentTimestamp = (BSONTimestamp) oplogCollection.find()
-              .sort(new BasicDBObject(OPLOG_TIMESTAMP, -1))
-              .limit(1).next()
-              .get(OPLOG_TIMESTAMP);
-          addQueryToStream("i", currentTimestamp, null);
-          return oplogCursor(currentTimestamp);
-      //  } finally {
-      //    mongo.unlock();
-      //  }
-      //} else {
-      //  throw new MongoException("Could not lock the database for FullCollection sync");
-      //}
+      BSONTimestamp currentTimestamp = (BSONTimestamp) oplogCollection.find()
+          .sort(new BasicDBObject(OPLOG_TIMESTAMP, -1))
+          .limit(1).next()
+          .get(OPLOG_TIMESTAMP);
+      addQueryToStream("i", currentTimestamp, null);
+      return oplogCursor(currentTimestamp);
     }
 
     @SuppressWarnings("unchecked")
@@ -476,11 +481,14 @@ public class MongoDBRiver extends AbstractRiverComponent implements River {
       }
     }
 
-    private void addToStream(final String operation, final BSONTimestamp currentTimestamp,
-        final Map<String, Object> data) {
+    private void addToStream(
+      String operation, final BSONTimestamp currentTimestamp,Map<String, Object> data
+    ) {
+      String itemSummary = data.get("handle") + ":" + data.get("_id");
+      if (itemSummary == null) itemSummary = data.toString();
+      logger.info("Processing {} : [{}]", operation, itemSummary);
       data.put(OPLOG_TIMESTAMP, currentTimestamp);
       data.put(OPLOG_OPERATION, operation);
-
       stream.add(data);
     }
 
